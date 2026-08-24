@@ -184,8 +184,6 @@ o6cG5hWtmCcvUXWwzB+5YTPmMDp28kRNNOyMLo9DPsS6LHcW5R96uEXsyE8G1lZo
 oQIDAQAB
 -----END PUBLIC KEY-----
 """
-DEMO_MAX_DAYS = 15
-DEMO_STATE    = Path("/opt/cyassure/.demo_start")
 LICENSE_PATH  = Path("/opt/cyassure/cyassure.lic")
 
 def _verify_signature(payload_str, sig_b64):
@@ -214,22 +212,16 @@ def _parse_lic_file(path):
 
 def _days_remaining(exp): return (date.fromisoformat(exp) - date.today()).days
 
-def _demo_days_remaining():
-    if not DEMO_STATE.exists():
-        DEMO_STATE.parent.mkdir(parents=True, exist_ok=True)
-        DEMO_STATE.write_text(date.today().isoformat())
-        return DEMO_MAX_DAYS
-    return max(0, DEMO_MAX_DAYS - (date.today() - date.fromisoformat(DEMO_STATE.read_text().strip())).days)
-
 def validate(lic_path=LICENSE_PATH):
+    # No license file -> Community Edition. Permanent, no countdown, no expiry -- this
+    # is a real edition, not a trial. (There used to be a time-boxed local "demo" here;
+    # that predates the 2026-08-02 permanent Community/Enterprise licensing model and
+    # is gone. See DOCKER_DEPLOYMENT.md section 5 / core/license_validator.py for the
+    # same rule enforced at runtime by the app itself.)
     p = Path(lic_path)
     if not p.exists():
-        d = _demo_days_remaining()
-        if d <= 0:
-            return {"valid":False,"type":"demo","days_remaining":0,"features":[],"customer":"Demo",
-                    "message":"Demo period expired. Purchase a license at cyassure.com"}
-        return {"valid":True,"type":"demo","days_remaining":d,"features":["cysiem"],
-                "customer":"Demo","message":f"Demo mode — {d} day(s) remaining"}
+        return {"valid":True,"type":"community","days_remaining":None,"features":[],
+                "customer":"Community","message":"No license file — running Community Edition (free forever)"}
     r = _parse_lic_file(p)
     if len(r) == 2:
         return {"valid":False,"type":"none","days_remaining":0,"features":[],"customer":"unknown",
@@ -278,22 +270,26 @@ CYASSURE_VALIDATOR_EOF
     _LIC_CUST=$(echo "$_LIC_JSON"  | python3 -c "import sys,json;print(json.load(sys.stdin).get('customer',''))" 2>/dev/null || echo "")
     rm -f "$_VALIDATOR_DEST"
 
+    # None of these ever abort the install. A missing/expired/invalid license means
+    # Community Edition, not a blocked install -- Enterprise activates only when a
+    # currently-valid signed license is present. Same rule the running app enforces
+    # itself (core/license_validator.py) and the one documented in
+    # DOCKER_DEPLOYMENT.md section 5 -- this installer used to disagree with both via
+    # a stale pre-2026-08-02 "15-day demo" concept that no longer exists.
     case $_LIC_CODE in
-        0) success "License: FULL — ${_LIC_CUST} — ${_LIC_DAYS} day(s) remaining"
+        0) success "License: ENTERPRISE — ${_LIC_CUST} — ${_LIC_DAYS} day(s) remaining"
            CYASSURE_DEMO_MODE=0 ;;
-        1) warn "License: DEMO — ${_LIC_DAYS} day(s) remaining"
-           warn "Full platform features will be limited. Place cyassure.lic in the installer"
-           warn "directory to activate a full license."
+        1) info "License: time-boxed evaluation — ${_LIC_DAYS} day(s) remaining"
            CYASSURE_DEMO_MODE=1 ;;
-        2) error "License EXPIRED — ${_LIC_MSG}"
-           error "Purchase or renew at https://cyassure.com"
-           exit 1 ;;
-        3) error "License INVALID — ${_LIC_MSG}"
-           error "The license file may have been tampered. Contact support@cyassure.com"
-           exit 1 ;;
+        2) warn "Enterprise license EXPIRED — ${_LIC_MSG}"
+           warn "Continuing with Community Edition. Renew at https://cyassure.com to restore Enterprise."
+           CYASSURE_DEMO_MODE=1 ;;
+        3) warn "Enterprise license INVALID — ${_LIC_MSG}"
+           warn "Continuing with Community Edition. Contact support@cyassure.com if this is unexpected."
+           CYASSURE_DEMO_MODE=1 ;;
         4|*)
-           warn "No license found — installing 15-day demo"
-           warn "Place cyassure.lic alongside this script to install the full platform."
+           info "No license found — running Community Edition (free forever)."
+           info "Place cyassure.lic alongside this script any time to activate Enterprise."
            CYASSURE_DEMO_MODE=1 ;;
     esac
     export CYASSURE_DEMO_MODE
@@ -1199,7 +1195,7 @@ PATCHEOF
 
     # Add MAXMIND_KEY if missing (hardcoded default shipped with setup.sh)
     if ! grep -q "^MAXMIND_KEY=" "$_env" 2>/dev/null; then
-        echo "MAXMIND_KEY=${MAXMIND_KEY:-}" >> "$_env"  # community mirror: bring your own free MaxMind key for GeoIP enrichment
+        echo "MAXMIND_KEY=${MAXMIND_KEY:-}" >> "$_env"
         info "Added MAXMIND_KEY to .env"
     fi
 
@@ -1327,7 +1323,7 @@ SECRETS_BACKEND=${SECRETS_BACKEND:-azure}
 #   2. `az login` CLI session  ← local dev
 AZURE_KEYVAULT_URL=${AZURE_KEYVAULT_URL:-}
 ENVEOF
-    echo "MAXMIND_KEY=${MAXMIND_KEY:-}" >> /opt/cyassure/.env  # community mirror: bring your own free MaxMind key for GeoIP enrichment
+    echo "MAXMIND_KEY=${MAXMIND_KEY:-}" >> /opt/cyassure/.env
 
     # ── ASM Scanner tuning (optional — defaults are safe for most deployments) ──
     cat >> /opt/cyassure/.env << ASMEOF
@@ -2336,7 +2332,7 @@ if [[ -f "$BUNDLE_DIR/agent/assets/sysmon/cyassure_sysmon_config.xml" ]]; then
 fi
 
 info "Post-install manual steps:"
-info "  1. GeoIP DB refreshes automatically every month if MAXMIND_KEY is set in .env (bring your own free key — https://www.maxmind.com/en/geolite2/signup)"
+info "  1. GeoIP DB is refreshed automatically every month (MAXMIND_KEY is pre-configured)"
 info "  2. Deploy CyEDR on endpoints:"
 info "       Linux/macOS: curl -fsSL https://<platform>/cyedr-install.sh | sudo bash -s -- --token <TOKEN> --platform <URL>"
 info "       Windows:     .\\cyedr-install.ps1 -Token <TOKEN> -Platform <URL>"
