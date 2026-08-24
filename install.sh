@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# CyAssure 360 -- Setup & Update Wizard v0.0.77 -- 2026-08-24 17:20 UTC
+# CyAssure 360 -- Setup & Update Wizard v0.0.79 -- 2026-08-24 23:14 UTC
 #
 # ONE script now does the whole job — this used to be a two-script install
 # (scripts/install.sh for the Docker app bring-up, this file for everything
@@ -322,7 +322,7 @@ ask_yn() {
 
 # Published version of this script — updated automatically by git-push.sh on each release.
 # Used by --update mode to skip re-installation when the server is already on the latest version.
-_SCRIPT_VERSION="v0.0.77"
+_SCRIPT_VERSION="v0.0.79"
 
 # Mask GIT auth tokens in URLs before printing to output
 _mask_url() { echo "$1" | sed 's|pkg\.github\.com/.*/|pkg.github.com/[TOKEN]/|g'; }
@@ -557,47 +557,33 @@ if [[ "$MODE" == "full" ]]; then
         cd "$_APP_COMPOSE_DIR"
         success "Docker app already installed at $(pwd) — skipping bring-up, continuing with host prep"
     else
-        if [[ -z "${GH_TOKEN:-}" ]]; then
-            error "GH_TOKEN is not set (or sudo didn't pass it through — 'sudo -E' isn't reliably"
-            error "honored on every sudoers policy, even root-to-root). Most reliable fix, pass"
-            error "it as a flag instead — this always works regardless of sudo's env policy:"
-            error "  bash cyassure-setup.sh --token <your-github-PAT>"
-            error "If you're not already root, prefix with sudo (flags survive sudo either way):"
-            error "  sudo bash cyassure-setup.sh --token <your-github-PAT>"
-            error "Token needs 'repo' scope (or 'contents:read' on a fine-grained PAT)."
-            exit 1
-        fi
-        _APP_GH_ORG="cyassure"
-        _APP_GH_REPO="cy360"
-        _app_auth_curl() { curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$@"; }
-
-        info "Detecting GitHub username from GH_TOKEN..."
-        _APP_GH_USER=$(_app_auth_curl "https://api.github.com/user" | jq -r '.login // empty')
-        [[ -n "$_APP_GH_USER" ]] || { error "Could not resolve a GitHub username from GH_TOKEN — check it's valid and has repo access."; exit 1; }
-        success "Authenticated as ${_APP_GH_USER}"
+        # No GH_TOKEN needed here: ghcr.io/cyassure/cy360-* images are public
+        # (anonymous `docker pull` works), and the deploy bundle below
+        # (docker-compose.yml/.env.example — no product source, ever, see
+        # scripts/docker-release.sh's header) is mirrored publicly to
+        # cyassure/get-cy360 alongside this script itself. GH_TOKEN is only
+        # for the later "DOWNLOAD RELEASE BUNDLE" step's CyEDR agent/host-
+        # assets bundle, which stays private — unrelated to this step.
+        _APP_MIRROR="https://raw.githubusercontent.com/cyassure/get-cy360/main"
 
         if [[ -n "$APP_VERSION" ]]; then
-            info "Fetching release ${APP_VERSION}..."
-            _APP_RELEASE_JSON=$(_app_auth_curl "https://api.github.com/repos/${_APP_GH_ORG}/${_APP_GH_REPO}/releases/tags/${APP_VERSION}") \
-                || { error "Release ${APP_VERSION} not found."; exit 1; }
+            _APP_TAG="$APP_VERSION"
         else
-            info "Fetching latest release..."
-            _APP_RELEASE_JSON=$(_app_auth_curl "https://api.github.com/repos/${_APP_GH_ORG}/${_APP_GH_REPO}/releases/latest") \
-                || { error "Could not fetch the latest release — check GH_TOKEN has repo access."; exit 1; }
+            info "Resolving latest version..."
+            _APP_TAG=$(curl -fsSL "${_APP_MIRROR}/manifest.json" | jq -r '.latest // empty') \
+                || { error "Could not reach ${_APP_MIRROR}/manifest.json to resolve the latest version."; exit 1; }
+            [[ -n "$_APP_TAG" ]] || { error "manifest.json had no 'latest' field."; exit 1; }
         fi
-        _APP_TAG=$(echo "$_APP_RELEASE_JSON" | jq -r '.tag_name')
-        _APP_ASSET_URL=$(echo "$_APP_RELEASE_JSON" | jq -r '.assets[] | select(.name | test("^cy360-docker-.*\\.tar\\.gz$")) | .url' | head -1)
-        [[ -n "$_APP_ASSET_URL" && "$_APP_ASSET_URL" != "null" ]] || { error "Release ${_APP_TAG} has no cy360-docker-*.tar.gz asset attached."; exit 1; }
-        success "Found release ${_APP_TAG}"
+        info "Installing ${_APP_TAG}..."
 
         [[ -e "$APP_DIR" ]] && { error "${APP_DIR} already exists but has no docker-compose.yml — remove it or pass --dir <new-path>."; exit 1; }
         mkdir -p "$APP_DIR"
-        info "Downloading Docker application bundle..."
-        curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/octet-stream" \
-            "$_APP_ASSET_URL" -o "${APP_DIR}/bundle.tar.gz"
-        tar xzf "${APP_DIR}/bundle.tar.gz" -C "$APP_DIR" --strip-components=1
-        rm -f "${APP_DIR}/bundle.tar.gz"
-        success "Unpacked to ${APP_DIR}/"
+        info "Downloading deployment bundle..."
+        curl -fsSL "${_APP_MIRROR}/bundles/${_APP_TAG}/docker-compose.yml" -o "${APP_DIR}/docker-compose.yml" \
+            || { error "No deploy bundle found for ${_APP_TAG} at ${_APP_MIRROR}/bundles/${_APP_TAG}/ — check the version exists in ${_APP_MIRROR}/manifest.json."; exit 1; }
+        curl -fsSL "${_APP_MIRROR}/bundles/${_APP_TAG}/.env.example" -o "${APP_DIR}/.env.example"
+        curl -fsSL "${_APP_MIRROR}/bundles/${_APP_TAG}/docker-compose.gvm.yml" -o "${APP_DIR}/docker-compose.gvm.yml" 2>/dev/null || true
+        success "Bundle downloaded to ${APP_DIR}/"
 
         cd "$APP_DIR"
 
@@ -618,7 +604,7 @@ if [[ "$MODE" == "full" ]]; then
             # per invocation).
             sed -i "s/change-me-to-a-clickhouse-random-value/$(openssl rand -hex 24)/" .env
             _app_proj_name=$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]/-/g')
-            sed -i "s|^GH_TOKEN=.*|GH_TOKEN=$(_escape_sed_repl "${GH_TOKEN}")|" .env
+            sed -i "s|^GH_TOKEN=.*|GH_TOKEN=$(_escape_sed_repl "${GH_TOKEN:-}")|" .env
             sed -i "s|^COMPOSE_PROJECT_DIR=.*|COMPOSE_PROJECT_DIR=$(pwd)|" .env
             sed -i "s|^COMPOSE_PROJECT_NAME=.*|COMPOSE_PROJECT_NAME=${_app_proj_name}|" .env
             success ".env created — edit it later for OAuth/SMTP/etc, none of that is required to start."
@@ -626,9 +612,6 @@ if [[ "$MODE" == "full" ]]; then
             info ".env already exists — leaving it as-is."
         fi
         chmod o+w .env
-
-        info "Logging in to ghcr.io..."
-        echo "$GH_TOKEN" | docker login ghcr.io -u "$_APP_GH_USER" --password-stdin
 
         info "Pulling images..."
         docker compose pull
@@ -773,13 +756,20 @@ if [[ -f "$_SCRIPT_DIR/manifest.json" && "$_SCRIPT_DIR" != "/opt/cyassure" ]]; t
     _RELEASE_JSON=""
 else
     # ── Remote download path: requires GH_TOKEN ───────────────────────────────
-    if [[ -z "$GH_TOKEN" ]]; then
-        error "GH_TOKEN is not set. Add it to /opt/cyassure/.env or pass inline:"
-        error "  GH_TOKEN=ghp_... sudo -E bash cyassure-setup.sh --update"
-        error "Token needs 'repo' scope (or 'contents:read' on a fine-grained PAT) for ${GH_ORG}/${GH_REPO}."
-        exit 1
-    fi
-
+    # Unlike the "DOCKER APPLICATION" step above (public bundle+images, no
+    # token needed), this host-assets bundle is genuinely private — CyEDR
+    # agent source + prebuilt binaries, not just deploy scaffolding — so a
+    # missing token degrades gracefully (same as "asset not found" below)
+    # rather than hard-failing the whole run. A token-less `curl | bash`
+    # install still brings the full app up; it just skips EDR asset
+    # staging/self-update/RELEASE_NOTES.md, same as the "no asset" case.
+    if [[ -z "${GH_TOKEN:-}" ]]; then
+        warn "GH_TOKEN not set — skipping host-assets bundle (CyEDR asset staging, Sysmon staging,"
+        warn "RELEASE_NOTES.md, and self-update). Pass --token <PAT> to enable these."
+        BUNDLE_DIR=""
+        CYASSURE_VERSION="${APP_VERSION:-unknown}"
+        _RELEASE_JSON=""
+    else
     # Step 1: resolve latest release metadata (single API call — no maven)
     info "Fetching latest release metadata from GitHub..."
     _RELEASE_JSON=$(curl -fsSL \
@@ -827,6 +817,7 @@ else
         mkdir -p "$BUNDLE_DIR"
         tar -xzf /tmp/cy360-host-assets.tar.gz -C "$BUNDLE_DIR"
         _BUNDLE_IS_TEMP=true
+    fi
     fi
 fi
 
