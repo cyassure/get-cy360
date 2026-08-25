@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# CyAssure 360 -- Setup & Update Wizard v0.0.84 -- 2026-08-25 14:03 UTC
+# CyAssure 360 -- Setup & Update Wizard v0.0.86 -- 2026-08-25 21:14 UTC
 #
 # ONE script now does the whole job — this used to be a two-script install
 # (scripts/install.sh for the Docker app bring-up, this file for everything
@@ -330,7 +330,7 @@ ask_yn() {
 
 # Published version of this script — updated automatically by git-push.sh on each release.
 # Used by --update mode to skip re-installation when the server is already on the latest version.
-_SCRIPT_VERSION="v0.0.84"
+_SCRIPT_VERSION="v0.0.86"
 
 # Mask GIT auth tokens in URLs before printing to output
 _mask_url() { echo "$1" | sed 's|pkg\.github\.com/.*/|pkg.github.com/[TOKEN]/|g'; }
@@ -1810,10 +1810,39 @@ server {
     # run as a one-liner on a target host to install/uninstall the agent —
     # there's no browser session for oauth2-proxy to check. Listed by exact
     # path rather than bypassing the whole /api/edr/installer/ prefix so
-    # the admin/agent-token-protected siblings under that same prefix
-    # (token, commands, uninstall-commands, agent-binary, custom-yara) stay
-    # behind oauth2-proxy as defense in depth.
+    # the admin/session-protected siblings under that same prefix (token,
+    # commands, uninstall-commands) stay behind oauth2-proxy.
     location ~ ^/api/edr/installer/(unix|win|uninstall-unix|uninstall-win|agent-bundle|tray-bundle|sysmon-config|sysmon-exe|yara-rules|yara-exe)$ {
+        proxy_pass         http://127.0.0.1:${APP_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header   Host              \$host;
+        proxy_set_header   X-Real-IP         \$remote_addr;
+        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto https;
+    }
+    # Every endpoint an ENROLLED agent (or a not-yet-enrolled one, for
+    # self-enroll) calls on its own — heartbeat, telemetry, FIM/SCA/tamper
+    # reporting, response-command polling, self-enroll, self-update binary
+    # download — all @require_agent_token Bearer-auth or deploy-token auth
+    # at the Flask layer, none of them ever has a browser session. This
+    # marker string (grep for CYEDR-AGENT-BYPASS) lets updater/server.py's
+    # matching _wire_iap_gateway_vhost() idempotently inject this same block
+    # into a vhost that predates it. Found live 2026-08-25: every one of
+    # these was silently 302-redirecting into the OIDC login flow instead of
+    # reaching Flask on any instance with IAP Gateway on — including
+    # installer/agent-binary and installer/custom-yara, which an earlier
+    # version of the comment above claimed should stay gated "as defense in
+    # depth" on top of their own Bearer check; wrong, since a headless agent
+    # can never complete an interactive OIDC login, so gating a route it
+    # calls autonomously doesn't add defense, it makes the route
+    # categorically unreachable. Meant enrollment AND telemetry from every
+    # already-enrolled agent were both broken, not just new installs. Listed
+    # by exact path/pattern (not the whole /api/edr/ prefix) so the
+    # session-protected admin surface under that same prefix (agent list,
+    # deployment tokens, agent enroll via admin session, policies, installer
+    # token/commands) stays behind oauth2-proxy.
+    # CYEDR-AGENT-BYPASS
+    location ~ ^/api/edr/(agents/self-enroll|agents/[^/]+/heartbeat|telemetry|logs|inventory|fim/events|fim/baseline|sca/results|tamper-events|response/[^/]+/pending|response/[^/]+/commands/[^/]+/complete|installer/agent-binary|installer/custom-yara)$ {
         proxy_pass         http://127.0.0.1:${APP_PORT};
         proxy_http_version 1.1;
         proxy_set_header   Host              \$host;
@@ -2126,6 +2155,66 @@ if [[ -n "$OAUTH2PROXY_SECRET" && -n "$OAUTH2PROXY_COOKIE_SECRET" ]]; then
             fi
         else
             warn "${_iap_vhost_real}: found a vhost matching server_name ${BASE_DOMAIN} but its proxy_pass doesn't match the expected http://127.0.0.1:${APP_PORT} pattern — not touching it automatically to avoid corrupting a custom config. Point it at http://127.0.0.1:4180 manually to enable IAP Gateway."
+        fi
+
+        # ── Inject the CyEDR agent-bypass location block if missing (idempotent) ──
+        # A vhost provisioned before 2026-08-25 (this fix) never got this block at
+        # all — see "HOST VHOST + TLS PROVISIONING" above's CYEDR-AGENT-BYPASS
+        # comment for the full incident. Runs regardless of which branch above
+        # fired (already-wired / just-wired / unrecognized-pattern) — this is
+        # orthogonal to whether IAP was just toggled on this run, it only needs
+        # a vhost to have been found. Same marker + insertion pattern as the
+        # /edr-packages/ injection below, and mirrored in updater/server.py's
+        # _wire_iap_gateway_vhost() (called on every /update and /upgrade) so an
+        # already-provisioned instance gets this fixed via the portal's Update
+        # button too, not just a fresh `cyassure-setup.sh --update` SSH run.
+        if ! grep -q "CYEDR-AGENT-BYPASS" "$_iap_vhost_real" 2>/dev/null; then
+            # Heredoc deliberately NOT 'quoted' — ${APP_PORT} below needs this
+            # script's own shell substitution. \$host/\$remote_addr/etc. are
+            # backslash-escaped so bash leaves them as literal $-prefixed text
+            # for Python to write into the nginx config verbatim (nginx's OWN
+            # variables, not this script's) — same technique the main vhost
+            # heredoc above already uses throughout.
+            python3 - "$_iap_vhost_real" << EDR_BYPASS_NGINX_PY
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+
+block = (
+    "    # CYEDR-AGENT-BYPASS — every endpoint an enrolled agent (or a\n"
+    "    # not-yet-enrolled one, for self-enroll) calls on its own: heartbeat,\n"
+    "    # telemetry, FIM/SCA/tamper reporting, response-command polling,\n"
+    "    # self-enroll, self-update binary download. All Bearer/deploy-token\n"
+    "    # authenticated at the Flask layer, never a browser session — gating\n"
+    "    # these behind oauth2-proxy makes them unreachable (a headless agent\n"
+    "    # can't complete an OIDC login), not more secure. Added 2026-08-25 —\n"
+    "    # see cyassure-setup.sh's matching block for the full incident.\n"
+    "    location ~ ^/api/edr/(agents/self-enroll|agents/[^/]+/heartbeat|telemetry|logs|inventory|fim/events|fim/baseline|sca/results|tamper-events|response/[^/]+/pending|response/[^/]+/commands/[^/]+/complete|installer/agent-binary|installer/custom-yara)\$ {\n"
+    "        proxy_pass         http://127.0.0.1:${APP_PORT};\n"
+    "        proxy_http_version 1.1;\n"
+    "        proxy_set_header   Host              \$host;\n"
+    "        proxy_set_header   X-Real-IP         \$remote_addr;\n"
+    "        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;\n"
+    "        proxy_set_header   X-Forwarded-Proto https;\n"
+    "    }\n"
+)
+
+anchor = "    location /api/ {"
+if anchor in text:
+    idx = text.find(anchor)
+    text = text[:idx] + block + text[idx:]
+    with open(path, "w") as f:
+        f.write(text)
+    print("nginx: CYEDR-AGENT-BYPASS location block injected")
+else:
+    print("nginx: 'location /api/ {' anchor not found — CYEDR-AGENT-BYPASS block NOT injected, check this vhost manually")
+EDR_BYPASS_NGINX_PY
+            nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null && \
+                success "nginx: CyEDR agent-bypass location block added and reloaded" || \
+                warn "nginx reload failed after CyEDR agent-bypass injection — check: nginx -t"
+        else
+            success "nginx: CyEDR agent-bypass location already configured"
         fi
     fi
 fi
