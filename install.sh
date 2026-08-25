@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# CyAssure 360 -- Setup & Update Wizard v0.0.79 -- 2026-08-24 23:14 UTC
+# CyAssure 360 -- Setup & Update Wizard v0.0.84 -- 2026-08-25 14:03 UTC
 #
 # ONE script now does the whole job — this used to be a two-script install
 # (scripts/install.sh for the Docker app bring-up, this file for everything
@@ -76,7 +76,15 @@
 
 set -euo pipefail
 
-
+# Captured here, before anything below ever `cd`s (the "DOCKER APPLICATION"
+# step below cds into APP_DIR, e.g. ./cy360/) — realpath/readlink on a
+# RELATIVE $0 (the common case: `curl -o cyassure-setup.sh -> sudo bash
+# cyassure-setup.sh`) resolves against the CURRENT working directory at the
+# time it's called, so computing this later, after the cd, silently resolves
+# to the wrong path (e.g. ./cy360/cyassure-setup.sh instead of the real
+# ./cyassure-setup.sh) — the self-copy step further down then fails with
+# "cp: cannot stat '<wrong path>': No such file or directory". Must be first.
+_SCRIPT_ABS_PATH="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")"
 
 # ── Colours & helpers (defined early — used by license check below) ───────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -322,7 +330,7 @@ ask_yn() {
 
 # Published version of this script — updated automatically by git-push.sh on each release.
 # Used by --update mode to skip re-installation when the server is already on the latest version.
-_SCRIPT_VERSION="v0.0.79"
+_SCRIPT_VERSION="v0.0.84"
 
 # Mask GIT auth tokens in URLs before printing to output
 _mask_url() { echo "$1" | sed 's|pkg\.github\.com/.*/|pkg.github.com/[TOKEN]/|g'; }
@@ -737,11 +745,14 @@ GH_REPO="cy360"
 # manifest.json will be in the same directory as this script.  In that case
 # we skip the download entirely — GH_TOKEN is not required.
 #
-# Use BASH_SOURCE[0] — more reliable than $0 when invoked as:
-#   sudo bash cyassure-setup.sh          (relative path, $0 = 'cyassure-setup.sh')
-#   sudo bash /tmp/.../cyassure-setup.sh  (absolute path)
-#   sudo -E bash ...                      (with preserved env)
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# Derived from _SCRIPT_ABS_PATH (captured at the very top of the script,
+# before any `cd`) rather than re-resolving BASH_SOURCE[0]/$0 here — by this
+# point the "DOCKER APPLICATION" step above has already cd'd into APP_DIR, so
+# a relative $0 would resolve against the WRONG (now-current) directory
+# instead of where the script actually lives. Same bug class fixed for
+# _SELF/_SETUP_DEST and _SCRIPT_BASE further down — see _SCRIPT_ABS_PATH's
+# own comment at the top of the file.
+_SCRIPT_DIR="$(dirname "$_SCRIPT_ABS_PATH")"
 BUNDLE_DIR="/tmp/cyassure-release"
 # Tracks whether $BUNDLE_DIR is scratch space this script created (safe to
 # rm -rf at Step 25 below) or an existing directory it's merely reading from.
@@ -879,7 +890,7 @@ for _edr_src_dest in \
     "${BUNDLE_DIR}/scripts/cyedr-install.ps1:cyedr-install.ps1" \
     "${BUNDLE_DIR}/scripts/cyedr-uninstall.sh:cyedr-uninstall.sh" \
     "${BUNDLE_DIR}/scripts/cyedr-uninstall.ps1:cyedr-uninstall.ps1" \
-    "${BUNDLE_DIR}/agent/cyedr_agent.py:cyedr_agent.py" \
+    "${BUNDLE_DIR}/agent/AGENT_VERSION:AGENT_VERSION" \
     "${BUNDLE_DIR}/agent/assets/yara/cyassure.yar:cyassure.yar"; do
     _src="${_edr_src_dest%%:*}"
     _dst_name="${_edr_src_dest##*:}"
@@ -917,7 +928,7 @@ fi
 # below is a no-op (_SELF == _SETUP_DEST).  Preferring the bundle copy fixes that:
 # on the first run the bundle's newer .sh is written to /opt/cyassure/; subsequent
 # runs see identical files and skip the copy.
-_SELF="$(realpath "$0")"
+_SELF="$_SCRIPT_ABS_PATH"
 _SETUP_DEST="/opt/cyassure/cyassure-setup.sh"
 _BUNDLE_SETUP="$BUNDLE_DIR/cyassure-setup.sh"
 if [[ -f "$_BUNDLE_SETUP" ]] && \
@@ -972,7 +983,7 @@ fi
 # cron entries are written by the portal's /api/system/schedules endpoint.
 
 # Deploy license validator + watchdog scripts
-_SCRIPT_BASE="$(dirname "$(realpath "${BASH_SOURCE[0]:-$0}")")"
+_SCRIPT_BASE="$(dirname "$_SCRIPT_ABS_PATH")"
 if [[ -f "$_SCRIPT_BASE/license_validator.py" ]]; then
     cp "$_SCRIPT_BASE/license_validator.py" /opt/cyassure/license_validator.py
     chmod 755 /opt/cyassure/license_validator.py
@@ -1712,7 +1723,7 @@ else
 #     structural problem as /oidc/ — a non-browser client can't complete
 #     oauth2-proxy's browser-redirect login flow.
 #   - /api/edr/installer/{unix,win,uninstall-unix,uninstall-win,agent-bundle,
-#     tray-bundle,sysmon-config,sysmon-exe,yara-rules,yara-exe,agent-py}:
+#     tray-bundle,sysmon-config,sysmon-exe,yara-rules,yara-exe}:
 #     the CyEDR install/uninstall one-liners admins curl|bash on a target
 #     host — no browser session exists there either. Listed by exact path
 #     (not the whole /api/edr/installer/ prefix) so the admin/agent-token
@@ -1800,9 +1811,9 @@ server {
     # there's no browser session for oauth2-proxy to check. Listed by exact
     # path rather than bypassing the whole /api/edr/installer/ prefix so
     # the admin/agent-token-protected siblings under that same prefix
-    # (token, commands, uninstall-commands, agent-script, agent-binary,
-    # custom-yara) stay behind oauth2-proxy as defense in depth.
-    location ~ ^/api/edr/installer/(unix|win|uninstall-unix|uninstall-win|agent-bundle|tray-bundle|sysmon-config|sysmon-exe|yara-rules|yara-exe|agent-py)$ {
+    # (token, commands, uninstall-commands, agent-binary, custom-yara) stay
+    # behind oauth2-proxy as defense in depth.
+    location ~ ^/api/edr/installer/(unix|win|uninstall-unix|uninstall-win|agent-bundle|tray-bundle|sysmon-config|sysmon-exe|yara-rules|yara-exe)$ {
         proxy_pass         http://127.0.0.1:${APP_PORT};
         proxy_http_version 1.1;
         proxy_set_header   Host              \$host;
@@ -2372,16 +2383,30 @@ chown www-data:www-data "$_AGENT_PKG_DIR" 2>/dev/null || true
 
 _bundle_pkgs="${BUNDLE_DIR:-/tmp/cyassure-release}/agent-packages"
 
-# ── Seed CyEDR agent + tray binaries from release bundle ────────────────────
-# Built automatically by CI (.github/workflows/deploy.yml — build-edr-linux/
-# macos/windows jobs) on every release and bundled here, same mechanism as
-# cy360-agent-* above. This is what lets a customer paste a single install
-# link copied from the Cy360 portal — /api/edr/installer/agent-bundle and
-# /tray-bundle can always serve a real binary with no manual build step by
-# devops or the customer. Filenames are OS/arch-keyed only (no version
-# suffix — see routes.py's installer_agent_bundle/installer_tray_bundle
-# _map), so this is a plain overwrite-on-update copy, not the versioned
-# rename cy360-agent-* needs above.
+# ── Seed Linux CyEDR agent + tray binaries from the host-assets bundle ──────
+# Built automatically by CI (.github/workflows/deploy.yml's build-and-publish
+# job — Linux only, built inline in that same job) and bundled into
+# cy360-host-assets-*.tar.gz, same mechanism as cy360-agent-* above. This is
+# what lets a customer paste a single install link copied from the Cy360
+# portal — /api/edr/installer/agent-bundle and /tray-bundle can always serve
+# a real Linux binary with no manual build step by devops or the customer.
+# Filenames are OS/arch-keyed only (no version suffix — see routes.py's
+# installer_agent_bundle/installer_tray_bundle _map), so this is a plain
+# overwrite-on-update copy, not the versioned rename cy360-agent-* needs
+# above.
+#
+# macOS and Windows do NOT land here — see the next step below, which stages
+# them separately. (This comment used to claim they were "bundled here" the
+# same way; found false 2026-08-25 — build-edr-macos and the on-demand-only
+# build-edr-windows are separate CI jobs, neither a `needs:` dependency of
+# the job that builds this tarball, so their binaries can't be baked into it
+# at that job's run time — Windows in particular may not even exist yet for
+# this tag when this tarball was built, if dispatched later. Until the next
+# step was added, nothing anywhere ever staged those two platforms onto a
+# live instance at all: a live install/update would correctly report the
+# new agent_version in its heartbeat (that's just a baked text file, always
+# current) while every macOS/Windows install or self-update attempt 404'd
+# indefinitely, with no error surfaced anywhere an operator would see it.
 _bundle_edr="${_bundle_pkgs}/edr"
 if [[ -d "$_bundle_edr" ]]; then
     # Matches routes.py's _EDR_PKG_DIR = "/var/lib/cyassure-agent-packages/edr"
@@ -2397,12 +2422,64 @@ if [[ -d "$_bundle_edr" ]]; then
         _edr_seeded=$((_edr_seeded+1))
     done
     if [[ $_edr_seeded -gt 0 ]]; then
-        success "CyEDR agent/tray binaries staged from release bundle: ${_edr_seeded} file(s) → ${_edr_dest}"
+        success "Linux CyEDR agent/tray binaries staged from host-assets bundle: ${_edr_seeded} file(s) → ${_edr_dest}"
     else
-        warn "Release bundle has no CyEDR agent/tray binaries (a build-edr-* CI job likely failed this release) — endpoints fall back to the Python-mode installer path until the next successful release"
+        warn "Host-assets bundle has no Linux CyEDR agent/tray binaries (build-and-publish's inline Linux build likely failed this release) — there is no fallback anymore (Python-mode installer removed 2026-08-25): Linux EDR installs will hard-fail until the next successful release, or run agent/packages/build-edr-packages.sh manually to stage them now"
     fi
 else
-    warn "No agent-packages/edr/ in release bundle — CyEDR binary quick-install unavailable until the next release; run agent/packages/build-edr-packages.sh manually to stage them now"
+    warn "No agent-packages/edr/ in host-assets bundle — Linux CyEDR binary quick-install unavailable until the next release; run agent/packages/build-edr-packages.sh manually to stage them now"
+fi
+
+# ── Seed macOS/Windows CyEDR binaries directly from release assets ──────────
+# Uploaded as flat, individually-named release assets by their own CI jobs
+# (build-edr-macos / build-edr-windows — see the comment above for why they
+# can't ride in the host-assets tarball) rather than a bundle this script
+# extracts, so this step looks each expected filename up directly in the
+# release's own asset list (routes.py's installer_agent_bundle/
+# installer_tray_bundle _map has the authoritative names) and downloads
+# whichever ones exist. Missing ones (most commonly Windows, if
+# build-edr-windows hasn't been dispatched yet for this tag — see
+# git-push.sh's header) are reported, not treated as an error: re-running
+# this script (--update) after a later on-demand dispatch is exactly how
+# those get picked up.
+if [[ -n "$_RELEASE_JSON" ]]; then
+    _edr_dest="${_AGENT_PKG_DIR}/edr"
+    mkdir -p "$_edr_dest"
+    _macwin_seeded=0
+    _macwin_missing=0
+    for _macwin_asset in \
+        cyedr-agent-macos-arm64 cyedr-agent-macos-intel64 \
+        cyedr-tray-macos-arm64  cyedr-tray-macos-intel64 \
+        cyedr-agent-windows-x64.exe cyedr-tray-windows-x64.exe; do
+        _asset_url=$(echo "$_RELEASE_JSON" | \
+            jq -r --arg n "$_macwin_asset" '.assets[] | select(.name == $n) | .url' | head -1)
+        if [[ -z "$_asset_url" || "$_asset_url" == "null" ]]; then
+            _macwin_missing=$((_macwin_missing+1))
+            continue
+        fi
+        # Asset API URL, not browser_download_url — same reasoning as the
+        # host-assets tarball download above (required for a private repo;
+        # the direct download URL 404s without the API + auth header).
+        if curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            "$_asset_url" \
+            -o "${_edr_dest}/${_macwin_asset}"; then
+            chmod 755 "${_edr_dest}/${_macwin_asset}"
+            chown www-data:www-data "${_edr_dest}/${_macwin_asset}" 2>/dev/null || true
+            _macwin_seeded=$((_macwin_seeded+1))
+        else
+            warn "Failed to download ${_macwin_asset} from release ${CYASSURE_VERSION}"
+        fi
+    done
+    if [[ $_macwin_seeded -gt 0 ]]; then
+        success "macOS/Windows CyEDR binaries staged from release assets: ${_macwin_seeded} file(s) → ${_edr_dest}"
+    fi
+    if [[ $_macwin_missing -gt 0 ]]; then
+        warn "${_macwin_missing} macOS/Windows CyEDR binary asset(s) not in release ${CYASSURE_VERSION} yet — expected if build-edr-windows hasn't been dispatched for this tag (gh workflow run deploy.yml -f windows_tag=${CYASSURE_VERSION} --repo cyassure/cy360, then re-run this script with --update), or a build-edr-macos leg failed. Affected platform(s) will hard-fail install/self-update until staged."
+    fi
+else
+    warn "Skipping macOS/Windows CyEDR binary staging — no release metadata available this run (see the host-assets bundle warning above)"
 fi
 
 # ── Step 23: Cron jobs ────────────────────────────────────────────────────────
