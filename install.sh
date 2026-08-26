@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# CyAssure 360 -- Setup & Update Wizard v0.0.86 -- 2026-08-25 21:14 UTC
+# CyAssure 360 -- Setup & Update Wizard v0.0.87 -- 2026-08-26 08:41 UTC
 #
 # ONE script now does the whole job — this used to be a two-script install
 # (scripts/install.sh for the Docker app bring-up, this file for everything
@@ -13,11 +13,20 @@
 # install" section on a Mac instead (a few extra commands, no apt-get needed).
 #
 # FRESH INSTALL (Docker app bring-up + host prep + EDR staging + hardening):
+#   sudo bash cyassure-setup.sh
+#   (running as root already? drop "sudo".)
+#
+# --token/GH_TOKEN is now OPTIONAL (2026-08-26) — without one, host-assets
+# (CyEDR agent/tray binaries, YARA/Sysmon, RELEASE_NOTES.md, self-update) are
+# fetched from the public cyassure/get-cy360 mirror instead of this repo's
+# private Releases API; Community and Enterprise ship identical binaries, so
+# there was never a real gate here. Pass --token <PAT> only if you need a
+# private/pre-release build instead of the latest public one:
 #   sudo bash cyassure-setup.sh --token <your-github-PAT>
-#   (running as root already? drop "sudo" — either way, --token is more
-#   reliable than `export GH_TOKEN=... && sudo -E ...`: sudo's env_reset
-#   policy silently strips exported vars, even with -E, on some systems even
-#   root-to-root — a flag always survives sudo regardless of that policy.)
+#   (--token is more reliable than `export GH_TOKEN=... && sudo -E ...`:
+#   sudo's env_reset policy silently strips exported vars, even with -E, on
+#   some systems even root-to-root — a flag always survives sudo regardless
+#   of that policy.)
 #
 # UPDATE EXISTING SERVER (skips infra + app bring-up, only refreshes host-side
 # packages/assets — the running app stack updates via Settings > Update/Upgrade
@@ -28,7 +37,9 @@
 #   --skip-ufw          skip the UFW firewall step entirely
 #   --skip-ssh-harden   leave SSH on its current port (no move to 2026)
 #   --dir <path>        install the Docker app into this directory (default: ./cy360)
-#   --token <PAT>       GitHub PAT for downloading releases (or set GH_TOKEN env var)
+#   --token <PAT>       optional — GitHub PAT to pull a private/pre-release build from
+#                        cyassure/cy360's Releases API instead of the public get-cy360
+#                        mirror (or set GH_TOKEN env var)
 #   --version vX.Y.Z    install a specific release instead of the latest
 #
 # NON-INTERACTIVE PRE-SEEDS (set before the command to skip the matching
@@ -330,7 +341,7 @@ ask_yn() {
 
 # Published version of this script — updated automatically by git-push.sh on each release.
 # Used by --update mode to skip re-installation when the server is already on the latest version.
-_SCRIPT_VERSION="v0.0.86"
+_SCRIPT_VERSION="v0.0.87"
 
 # Mask GIT auth tokens in URLs before printing to output
 _mask_url() { echo "$1" | sed 's|pkg\.github\.com/.*/|pkg.github.com/[TOKEN]/|g'; }
@@ -766,20 +777,65 @@ if [[ -f "$_SCRIPT_DIR/manifest.json" && "$_SCRIPT_DIR" != "/opt/cyassure" ]]; t
     CYASSURE_VERSION=$(cat "$_SCRIPT_DIR/VERSION" 2>/dev/null || jq -r '.version' "$_SCRIPT_DIR/manifest.json" 2>/dev/null || echo "unknown")
     _RELEASE_JSON=""
 else
-    # ── Remote download path: requires GH_TOKEN ───────────────────────────────
-    # Unlike the "DOCKER APPLICATION" step above (public bundle+images, no
-    # token needed), this host-assets bundle is genuinely private — CyEDR
-    # agent source + prebuilt binaries, not just deploy scaffolding — so a
-    # missing token degrades gracefully (same as "asset not found" below)
-    # rather than hard-failing the whole run. A token-less `curl | bash`
-    # install still brings the full app up; it just skips EDR asset
-    # staging/self-update/RELEASE_NOTES.md, same as the "no asset" case.
+    # ── Remote download path ───────────────────────────────────────────────
+    # Public mirror (no token needed) unless GH_TOKEN is explicitly set, in
+    # which case the private release path below is used instead (unchanged,
+    # kept for pre-release/private testing).
+    #
+    # 2026-08-26: this used to hard-require GH_TOKEN and skip host-assets
+    # staging entirely without one. Reconsidered — the host-assets content
+    # (CyEDR agent/tray binaries, YARA/Sysmon, install/uninstall scripts,
+    # RELEASE_NOTES.md) does not differ between Community and Enterprise
+    # (core/license_validator.py), and Community is license-free (no .lic to
+    # embed a scoped download credential into even if we wanted to), so
+    # requiring a personal GitHub PAT on every fresh install AND every
+    # --update bought no real commercial boundary — only friction. deploy.yml
+    # (build-and-publish / build-edr-macos / build-edr-windows) now mirrors
+    # this same content to the public cyassure/get-cy360 repo on every
+    # release, the same public repo the "DOCKER APPLICATION" step above
+    # already pulls docker-compose.yml/.env.example from.
     if [[ -z "${GH_TOKEN:-}" ]]; then
-        warn "GH_TOKEN not set — skipping host-assets bundle (CyEDR asset staging, Sysmon staging,"
-        warn "RELEASE_NOTES.md, and self-update). Pass --token <PAT> to enable these."
-        BUNDLE_DIR=""
-        CYASSURE_VERSION="${APP_VERSION:-unknown}"
-        _RELEASE_JSON=""
+        _HA_MIRROR="https://raw.githubusercontent.com/cyassure/get-cy360/main"
+        info "No GH_TOKEN — fetching host-assets from the public mirror instead..."
+        _HA_TAG="${APP_VERSION:-}"
+        if [[ -z "$_HA_TAG" ]]; then
+            _HA_TAG=$(curl -fsSL "${_HA_MIRROR}/manifest.json" 2>/dev/null | jq -r '.latest // empty')
+        fi
+        if [[ -z "$_HA_TAG" ]]; then
+            warn "Could not resolve latest version from the public mirror — skipping host-assets staging"
+            warn "(CyEDR asset staging, Sysmon staging, RELEASE_NOTES.md, and self-update). Pass --token <PAT> to use the private release instead."
+            BUNDLE_DIR=""
+            CYASSURE_VERSION="${APP_VERSION:-unknown}"
+            _RELEASE_JSON=""
+        else
+            _HA_BASE="${_HA_MIRROR}/host-assets/${_HA_TAG}"
+            BUNDLE_DIR="/tmp/cyassure-release"
+            rm -rf "$BUNDLE_DIR"
+            mkdir -p "$BUNDLE_DIR/scripts" "$BUNDLE_DIR/agent/assets/yara" "$BUNDLE_DIR/agent/assets/sysmon" "$BUNDLE_DIR/agent-packages/edr"
+            _BUNDLE_IS_TEMP=true
+            _ha_ok=0
+            curl -fsSL "${_HA_BASE}/manifest.json"                                  -o "$BUNDLE_DIR/manifest.json"                                  2>/dev/null && _ha_ok=1
+            curl -fsSL "${_HA_BASE}/cyassure-setup.sh"                              -o "$BUNDLE_DIR/cyassure-setup.sh"                              2>/dev/null
+            curl -fsSL "${_HA_BASE}/scripts/cyedr-install.sh"                       -o "$BUNDLE_DIR/scripts/cyedr-install.sh"                       2>/dev/null
+            curl -fsSL "${_HA_BASE}/scripts/cyedr-install.ps1"                      -o "$BUNDLE_DIR/scripts/cyedr-install.ps1"                      2>/dev/null
+            curl -fsSL "${_HA_BASE}/scripts/cyedr-uninstall.sh"                     -o "$BUNDLE_DIR/scripts/cyedr-uninstall.sh"                     2>/dev/null
+            curl -fsSL "${_HA_BASE}/scripts/cyedr-uninstall.ps1"                    -o "$BUNDLE_DIR/scripts/cyedr-uninstall.ps1"                    2>/dev/null
+            curl -fsSL "${_HA_BASE}/agent/AGENT_VERSION"                            -o "$BUNDLE_DIR/agent/AGENT_VERSION"                            2>/dev/null
+            curl -fsSL "${_HA_BASE}/agent/assets/yara/cyassure.yar"                 -o "$BUNDLE_DIR/agent/assets/yara/cyassure.yar"                 2>/dev/null
+            curl -fsSL "${_HA_BASE}/agent/assets/sysmon/cyassure_sysmon_config.xml" -o "$BUNDLE_DIR/agent/assets/sysmon/cyassure_sysmon_config.xml" 2>/dev/null
+            curl -fsSL "${_HA_BASE}/RELEASE_NOTES.md"                               -o "$BUNDLE_DIR/RELEASE_NOTES.md"                               2>/dev/null
+            for _ha_bin in cyedr-agent-linux-x86_64 cyedr-agent-linux-aarch64 cyedr-tray-linux-x86_64 cyedr-tray-linux-aarch64; do
+                curl -fsSL "${_HA_BASE}/agent-packages/edr/${_ha_bin}" -o "$BUNDLE_DIR/agent-packages/edr/${_ha_bin}" 2>/dev/null \
+                    || rm -f "$BUNDLE_DIR/agent-packages/edr/${_ha_bin}"
+            done
+            if [[ "$_ha_ok" == "1" ]]; then
+                success "Host-assets fetched from public mirror (${_HA_TAG})"
+            else
+                warn "Public mirror did not have host-assets for ${_HA_TAG} yet (release still publishing?) — some CyEDR asset staging may be incomplete this run. Re-run with --update once it's synced, or pass --token <PAT> for the private release."
+            fi
+            CYASSURE_VERSION="$_HA_TAG"
+            _RELEASE_JSON=""
+        fi
     else
     # Step 1: resolve latest release metadata (single API call — no maven)
     info "Fetching latest release metadata from GitHub..."
@@ -2566,6 +2622,36 @@ if [[ -n "$_RELEASE_JSON" ]]; then
     fi
     if [[ $_macwin_missing -gt 0 ]]; then
         warn "${_macwin_missing} macOS/Windows CyEDR binary asset(s) not in release ${CYASSURE_VERSION} yet — expected if build-edr-windows hasn't been dispatched for this tag (gh workflow run deploy.yml -f windows_tag=${CYASSURE_VERSION} --repo cyassure/cy360, then re-run this script with --update), or a build-edr-macos leg failed. Affected platform(s) will hard-fail install/self-update until staged."
+    fi
+elif [[ -n "${_HA_BASE:-}" ]]; then
+    # Public-mirror equivalent of the block above — used whenever no
+    # GH_TOKEN was supplied (see the "DOWNLOAD RELEASE BUNDLE" step's
+    # 2026-08-26 note). build-edr-macos/build-edr-windows now mirror their
+    # binaries to the same host-assets/<tag>/agent-packages/edr/ directory
+    # on the public repo, so this is a plain unauthenticated curl per file
+    # instead of a GitHub Releases API asset lookup.
+    _edr_dest="${_AGENT_PKG_DIR}/edr"
+    mkdir -p "$_edr_dest"
+    _macwin_seeded=0
+    _macwin_missing=0
+    for _macwin_asset in \
+        cyedr-agent-macos-arm64 cyedr-agent-macos-intel64 \
+        cyedr-tray-macos-arm64  cyedr-tray-macos-intel64 \
+        cyedr-agent-windows-x64.exe cyedr-tray-windows-x64.exe; do
+        if curl -fsSL "${_HA_BASE}/agent-packages/edr/${_macwin_asset}" -o "${_edr_dest}/${_macwin_asset}" 2>/dev/null; then
+            chmod 755 "${_edr_dest}/${_macwin_asset}"
+            chown www-data:www-data "${_edr_dest}/${_macwin_asset}" 2>/dev/null || true
+            _macwin_seeded=$((_macwin_seeded+1))
+        else
+            rm -f "${_edr_dest}/${_macwin_asset}"
+            _macwin_missing=$((_macwin_missing+1))
+        fi
+    done
+    if [[ $_macwin_seeded -gt 0 ]]; then
+        success "macOS/Windows CyEDR binaries staged from public mirror: ${_macwin_seeded} file(s) → ${_edr_dest}"
+    fi
+    if [[ $_macwin_missing -gt 0 ]]; then
+        warn "${_macwin_missing} macOS/Windows CyEDR binary asset(s) not on the public mirror yet for ${CYASSURE_VERSION} — expected if build-edr-windows hasn't been dispatched for this tag, or a build-edr-macos leg failed/hasn't synced yet. Re-run with --update once it's published, or pass --token <PAT> for the private release."
     fi
 else
     warn "Skipping macOS/Windows CyEDR binary staging — no release metadata available this run (see the host-assets bundle warning above)"
