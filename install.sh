@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# CyAssure 360 -- Setup & Update Wizard v0.0.88 -- 2026-08-26 10:09 UTC
+# CyAssure 360 -- Setup & Update Wizard v0.0.89 -- 2026-09-03 07:17 UTC
 #
 # ONE script now does the whole job — this used to be a two-script install
 # (scripts/install.sh for the Docker app bring-up, this file for everything
@@ -341,7 +341,7 @@ ask_yn() {
 
 # Published version of this script — updated automatically by git-push.sh on each release.
 # Used by --update mode to skip re-installation when the server is already on the latest version.
-_SCRIPT_VERSION="v0.0.88"
+_SCRIPT_VERSION="v0.0.89"
 
 # Mask GIT auth tokens in URLs before printing to output
 _mask_url() { echo "$1" | sed 's|pkg\.github\.com/.*/|pkg.github.com/[TOKEN]/|g'; }
@@ -615,6 +615,10 @@ if [[ "$MODE" == "full" ]]; then
             info "Generating .env with random secrets..."
             cp .env.example .env
             sed -i "s/change-me-to-a-strong-random-value/$(openssl rand -hex 24)/" .env
+            # Roadmap item #34 Phase 2 (edr-i-54) — a genuinely separate
+            # secret from POSTGRES_PASSWORD above, own sed invocation so it
+            # gets its own independently-generated value, not a shared one.
+            sed -i "s/change-me-to-a-cyassure-app-random-value/$(openssl rand -hex 24)/" .env
             sed -i "s/change-me-to-a-long-random-value/$(openssl rand -hex 32)/" .env
             sed -i "s/change-me-to-a-random-value/$(openssl rand -hex 24)/" .env
             # Deliberately a separate sed invocation from the two above — sharing a
@@ -629,6 +633,16 @@ if [[ "$MODE" == "full" ]]; then
             success ".env created — edit it later for OAuth/SMTP/etc, none of that is required to start."
         else
             info ".env already exists — leaving it as-is."
+        fi
+        # Roadmap item #34 Phase 2 (edr-i-54) — an existing .env from before
+        # CYASSURE_APP_DB_PASSWORD existed as its own secret needs it patched
+        # in (matching the CYASSURE_DB_URL back-compat patch pattern
+        # elsewhere in this script); db_least_privilege.py falls back to
+        # reusing POSTGRES_PASSWORD when this is genuinely absent, but every
+        # deployment should get the real fix on its next `docker compose up`.
+        if ! grep -q "^CYASSURE_APP_DB_PASSWORD=" .env 2>/dev/null; then
+            echo "CYASSURE_APP_DB_PASSWORD=$(openssl rand -hex 24)" >> .env
+            info "Added CYASSURE_APP_DB_PASSWORD to .env (separate secret from POSTGRES_PASSWORD)"
         fi
         chmod o+w .env
 
@@ -1228,8 +1242,12 @@ PATCHEOF
     fi
 
     # Add CYASSURE_DB_URL if missing (introduced with PostgreSQL-backed RBAC)
+    # cyassure_app, not corruser — roadmap item #34 Phase 2: corruser is a
+    # Postgres superuser by default, which bypasses RLS. See
+    # backend/core/db_least_privilege.py and docker-compose.yml's backend
+    # service comment for the full fix.
     if ! grep -q "^CYASSURE_DB_URL=" "$_env" 2>/dev/null; then
-        _CY_DB_URL="postgresql://corruser:${CORR_DB_PASS}@127.0.0.1:5433/correlation"
+        _CY_DB_URL="postgresql://cyassure_app:${CORR_DB_PASS}@127.0.0.1:5433/correlation"
         cat >> "$_env" << PATCHEOF
 
 # ── CyAssure 360 user DB — Flask RBAC backed by PostgreSQL ─────────────────────
@@ -1346,7 +1364,11 @@ SIEM_ENGINE_URL=http://127.0.0.1:8100
 
 # ── CyAssure 360 user DB — Flask RBAC backed by PostgreSQL ─────────────────────
 # Reuses the existing correlation DB (port 5433) — no new database required.
-CYASSURE_DB_URL=postgresql://corruser:${CORR_DB_PASS}@127.0.0.1:5433/correlation
+# cyassure_app, not corruser — roadmap item #34 Phase 2: corruser is a
+# Postgres superuser by default, which bypasses RLS. See
+# backend/core/db_least_privilege.py and docker-compose.yml's backend
+# service comment for the full fix.
+CYASSURE_DB_URL=postgresql://cyassure_app:${CORR_DB_PASS}@127.0.0.1:5433/correlation
 
 # GitHub token — used by the portal backend to download updates/upgrades without
 # requiring the customer to enter it in the UI.  Set via GH_TOKEN env var at install time.
@@ -1413,7 +1435,11 @@ ASMEOF
 # CLOUD_MISP_*, CYMIND_*, BASE_DOMAIN, etc.) comes from /opt/cyassure/.env,
 # which the cysiemstack-engine.service loads first.  Only update .env.
 
-DATABASE_URL=postgresql+asyncpg://corruser:${CORR_DB_PASS}@127.0.0.1:5433/correlation
+# cyassure_app, not corruser — roadmap item #34 Phase 2: corruser is a
+# Postgres superuser by default, which bypasses RLS. See
+# backend/core/db_least_privilege.py and docker-compose.yml's
+# cysiemstack-engine service comment for the full fix.
+DATABASE_URL=postgresql+asyncpg://cyassure_app:${CORR_DB_PASS}@127.0.0.1:5433/correlation
 # Standalone key so --update mode can read the DB password without parsing DATABASE_URL
 POSTGRES_PASSWORD=${CORR_DB_PASS}
 
