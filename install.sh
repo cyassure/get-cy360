@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# CyAssure 360 -- Setup & Update Wizard v0.0.91 -- 2026-09-04 17:15 UTC
+# CyAssure 360 -- Setup & Update Wizard v0.0.92 -- 2026-09-04 18:30 UTC
 #
 # ONE script now does the whole job — this used to be a two-script install
 # (scripts/install.sh for the Docker app bring-up, this file for everything
@@ -341,7 +341,7 @@ ask_yn() {
 
 # Published version of this script — updated automatically by git-push.sh on each release.
 # Used by --update mode to skip re-installation when the server is already on the latest version.
-_SCRIPT_VERSION="v0.0.91"
+_SCRIPT_VERSION="v0.0.92"
 
 # Mask GIT auth tokens in URLs before printing to output
 _mask_url() { echo "$1" | sed 's|pkg\.github\.com/.*/|pkg.github.com/[TOKEN]/|g'; }
@@ -1239,6 +1239,24 @@ PATCHEOF
         # Export into current session so the IAP setup step below can use them
         OAUTH2PROXY_SECRET="$_new_oauth2_secret"
         OAUTH2PROXY_COOKIE_SECRET="$_new_cookie_secret"
+    fi
+
+    # Add CYASSURE_APP_DB_PASSWORD if missing (roadmap item #34 Phase 2,
+    # edr-i-54) — a genuinely separate secret from POSTGRES_PASSWORD. The
+    # fresh-install branch above (DOCKER APPLICATION step) already backfills
+    # this for a NEW install, but that block never runs for an EXISTING one
+    # (it's gated on docker-compose.yml not existing yet), so an existing
+    # deployment from before this var existed never got it here — found live
+    # via the portal's Update/Upgrade buttons hard-failing `docker compose
+    # pull` with "CYASSURE_APP_DB_PASSWORD is missing a value" once a release
+    # synced in a docker-compose.yml referencing it (see updater/server.py's
+    # _backfill_env_vars, the equivalent patch for that code path). A freshly
+    # generated value here needs no coordination: backend/core/
+    # db_least_privilege.py ALTERs the cyassure_app Postgres role's password
+    # to match whatever this holds on every backend boot.
+    if ! grep -q "^CYASSURE_APP_DB_PASSWORD=" "$_env" 2>/dev/null; then
+        echo "CYASSURE_APP_DB_PASSWORD=$(openssl rand -hex 24)" >> "$_env"
+        info "Added CYASSURE_APP_DB_PASSWORD to .env (separate secret from POSTGRES_PASSWORD)"
     fi
 
     # Add CYASSURE_DB_URL if missing (introduced with PostgreSQL-backed RBAC)
