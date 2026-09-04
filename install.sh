@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# CyAssure 360 -- Setup & Update Wizard v0.0.89 -- 2026-09-03 07:17 UTC
+# CyAssure 360 -- Setup & Update Wizard v0.0.90 -- 2026-09-04 14:30 UTC
 #
 # ONE script now does the whole job — this used to be a two-script install
 # (scripts/install.sh for the Docker app bring-up, this file for everything
@@ -301,10 +301,10 @@ CYASSURE_VALIDATOR_EOF
         1) info "License: time-boxed evaluation — ${_LIC_DAYS} day(s) remaining"
            CYASSURE_DEMO_MODE=1 ;;
         2) warn "Enterprise license EXPIRED — ${_LIC_MSG}"
-           warn "Continuing with Community Edition. Renew at https://cyassure.com to restore Enterprise."
+           warn "Continuing with Community Edition. Renew at https://cyassure.eu to restore Enterprise."
            CYASSURE_DEMO_MODE=1 ;;
         3) warn "Enterprise license INVALID — ${_LIC_MSG}"
-           warn "Continuing with Community Edition. Contact support@cyassure.com if this is unexpected."
+           warn "Continuing with Community Edition. Contact support@cyassure.eu if this is unexpected."
            CYASSURE_DEMO_MODE=1 ;;
         4|*)
            info "No license found — running Community Edition (free forever)."
@@ -341,7 +341,7 @@ ask_yn() {
 
 # Published version of this script — updated automatically by git-push.sh on each release.
 # Used by --update mode to skip re-installation when the server is already on the latest version.
-_SCRIPT_VERSION="v0.0.89"
+_SCRIPT_VERSION="v0.0.90"
 
 # Mask GIT auth tokens in URLs before printing to output
 _mask_url() { echo "$1" | sed 's|pkg\.github\.com/.*/|pkg.github.com/[TOKEN]/|g'; }
@@ -425,8 +425,8 @@ if [[ -z "${_CYASSURE_PROMPTS_DONE:-}" ]]; then
             BASE_DOMAIN="$CYASSURE_SETUP_DOMAIN"
             info "Using domain from CYASSURE_SETUP_DOMAIN: ${BASE_DOMAIN}"
         else
-            read -p "Enter your base domain name [cyassure.com]: " USER_DOMAIN
-            BASE_DOMAIN="${USER_DOMAIN:-cyassure.com}"
+            read -p "Enter your base domain name [cyassure.eu]: " USER_DOMAIN
+            BASE_DOMAIN="${USER_DOMAIN:-cyassure.eu}"
         fi
 
         step_header "ENVIRONMENT TYPE"
@@ -655,7 +655,7 @@ if [[ "$MODE" == "full" ]]; then
         _APP_PORT=$(grep -m1 '^APP_PORT=' .env | cut -d= -f2); _APP_PORT="${_APP_PORT:-8080}"
         success "CyAssure 360 ${_APP_TAG} is starting in $(pwd)/"
         info "Once healthy, open http://localhost:${_APP_PORT}"
-        info "Default login: cyadmin@cyassure.com / Admin@123 — change this immediately."
+        info "Default login: cyadmin@cyassure.eu / Admin@123 — change this immediately."
     fi
 fi
 
@@ -1096,17 +1096,17 @@ fi
 if [[ "$MODE" == "full" ]]; then
     # Use BASE_DOMAIN from earlier prompt or .env
     if [[ ! -f "/opt/cyassure/.env" ]]; then
-        BASE_DOMAIN="${BASE_DOMAIN:-cyassure.com}"
+        BASE_DOMAIN="${BASE_DOMAIN:-cyassure.eu}"
     else
         source /opt/cyassure/.env
-        BASE_DOMAIN="${BASE_DOMAIN:-cyassure.com}"
+        BASE_DOMAIN="${BASE_DOMAIN:-cyassure.eu}"
     fi
     
     # ── No interactive prompts — all config is set via environment variables or
     # ── edited in /opt/cyassure/.env post-install.
     CLIENT_NAME="${CLIENT_NAME:-cyassure}"
-    CLIENT_EMAIL="${CLIENT_EMAIL:-admin@cyassure.com}"
-    BASE_DOMAIN="${BASE_DOMAIN:-cyassure.com}"
+    CLIENT_EMAIL="${CLIENT_EMAIL:-admin@cyassure.eu}"
+    BASE_DOMAIN="${BASE_DOMAIN:-cyassure.eu}"
     OAUTH_PROVIDER="${OAUTH_PROVIDER:-google}"
     # ── OAuth credentials — loaded from Azure Key Vault at runtime.
     # Written as empty here; the app fetches them from Key Vault on startup
@@ -1153,8 +1153,8 @@ else
     }
     set -a; source /opt/cyassure/.env; set +a
     CLIENT_NAME="${CLIENT_NAME:-cyassure}"
-    CLIENT_EMAIL="${CLIENT_EMAIL:-admin@cyassure.com}"
-    BASE_DOMAIN="${BASE_DOMAIN:-cyassure.com}"
+    CLIENT_EMAIL="${CLIENT_EMAIL:-admin@cyassure.eu}"
+    BASE_DOMAIN="${BASE_DOMAIN:-cyassure.eu}"
     INSTALL_CYSIEM=true; INSTALL_CYSOAR=true
     success "Loaded existing configuration (domain: ${BASE_DOMAIN})"
 
@@ -1179,8 +1179,8 @@ else
     if ! grep -q "^CLOUD_MISP_URL=" "$_env" 2>/dev/null; then
         cat >> "$_env" << PATCHEOF
 
-# ── Cloud CyMISP (Cyassure-managed MISP at cymisp.cyassure.com) ────────────────
-CLOUD_MISP_URL=${CLOUD_MISP_URL:-https://cymisp.cyassure.com}
+# ── Cloud CyMISP (Cyassure-managed MISP at cymisp.cyassure.eu) ────────────────
+CLOUD_MISP_URL=${CLOUD_MISP_URL:-https://cymisp.cyassure.eu}
 CLOUD_MISP_API_KEY=${CLOUD_MISP_API_KEY:-}
 AZURE_KEYVAULT_URL=${AZURE_KEYVAULT_URL:-}
 PATCHEOF
@@ -1189,7 +1189,7 @@ PATCHEOF
 
     # Backfill CLOUD_MISP defaults if the value was written empty (pre-v1.2.56)
     if grep -q "^CLOUD_MISP_URL=$" "$_env" 2>/dev/null; then
-        _fill_misp_url="${CLOUD_MISP_URL:-https://cymisp.cyassure.com}"
+        _fill_misp_url="${CLOUD_MISP_URL:-https://cymisp.cyassure.eu}"
         sed -i "s|^CLOUD_MISP_URL=$|CLOUD_MISP_URL=${_fill_misp_url}|" "$_env"
         info "Backfilled CLOUD_MISP_URL → ${_fill_misp_url}"
     fi
@@ -1358,7 +1358,7 @@ SMTP_HOST=${SMTP_HOST:-}
 SMTP_PORT=${SMTP_PORT:-}
 SMTP_USER=${SMTP_USER:-}
 SMTP_PASS=${SMTP_PASS:-}
-SUPPORT_EMAIL=${SUPPORT_EMAIL:-support@cyassure.com}
+SUPPORT_EMAIL=${SUPPORT_EMAIL:-support@cyassure.eu}
 
 SIEM_ENGINE_URL=http://127.0.0.1:8100
 
@@ -1374,11 +1374,11 @@ CYASSURE_DB_URL=postgresql://cyassure_app:${CORR_DB_PASS}@127.0.0.1:5433/correla
 # requiring the customer to enter it in the UI.  Set via GH_TOKEN env var at install time.
 GH_TOKEN=${GH_TOKEN:-}
 
-# ── Cloud CyMISP (Cyassure-managed MISP at cymisp.cyassure.com) ────────────────
+# ── Cloud CyMISP (Cyassure-managed MISP at cymisp.cyassure.eu) ────────────────
 # When a customer selects "Cloud CyMISP" in System Settings > Integrations, the
 # backend uses these credentials automatically.  CLOUD_MISP_API_KEY must be set
 # to the vendor-issued API key for this installation.
-CLOUD_MISP_URL=${CLOUD_MISP_URL:-https://cymisp.cyassure.com}
+CLOUD_MISP_URL=${CLOUD_MISP_URL:-https://cymisp.cyassure.eu}
 CLOUD_MISP_API_KEY=${CLOUD_MISP_API_KEY:-BPxY79PEX9Y39eooVpNVu0UpayhYaqCfe74ZOHJb}
 
 
@@ -1502,7 +1502,7 @@ step_header "IAP GATEWAY (oauth2-proxy)"
 # Load vars from .env if not already in memory (update mode)
 [[ -z "${BASE_DOMAIN:-}" ]] && \
     BASE_DOMAIN=$(grep "^BASE_DOMAIN=" /opt/cyassure/.env 2>/dev/null | cut -d= -f2- || true)
-BASE_DOMAIN="${BASE_DOMAIN:-cyassure.com}"
+BASE_DOMAIN="${BASE_DOMAIN:-cyassure.eu}"
 
 # ── Sync BASE_DOMAIN into the app's own .env ──────────────────────────────────
 # Everything above only ever fed /opt/cyassure/.env (legacy) and cy-proxy's own
@@ -1740,7 +1740,7 @@ TLS_MODE="${TLS_MODE:-http01}"
 
 if [[ "$TLS_MODE" == "none" ]]; then
     :  # customer-managed edge — Step 4.3c's own info line covers this case
-elif [[ -z "$BASE_DOMAIN" || "$BASE_DOMAIN" == "cyassure.com" ]]; then
+elif [[ -z "$BASE_DOMAIN" || "$BASE_DOMAIN" == "cyassure.eu" ]]; then
     info "BASE_DOMAIN not configured to a real domain yet — skipping host vhost/TLS provisioning (re-run once it's set)"
 else
     step_header "HOST VHOST + TLS (mode: ${TLS_MODE})"
